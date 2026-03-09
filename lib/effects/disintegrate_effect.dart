@@ -117,18 +117,34 @@ class _DisintegrateEffectState extends State<DisintegrateEffect>
 
         if (_animating && _snapshotImage != null && _program != null)
           Positioned.fill(
-            child: AnimatedBuilder(
-              animation: _controller,
-              builder: (context, _) {
-                return CustomPaint(
-                  painter: _ShaderDustPainter(
-                    program: _program!,
-                    image: _snapshotImage!,
-                    progress: _controller.value,
-                    randoms: _randoms,
-                  ),
-                );
-              },
+            child: OverflowBox(
+              minWidth: 0,
+              minHeight: 0,
+              maxWidth: double.infinity,
+              maxHeight: double.infinity,
+              child: AnimatedBuilder(
+                animation: _controller,
+                builder: (context, _) {
+                  // We provide a much larger region for the particles to fly out over
+                  // Assuming they can drift roughly 200px out, we expand the paint region.
+                  return LayoutBuilder(
+                    builder: (context, constraints) {
+                      return CustomPaint(
+                        size: Size(
+                          (_snapshotImage!.width + 400).toDouble(),
+                          (_snapshotImage!.height + 400).toDouble(),
+                        ),
+                        painter: _ShaderDustPainter(
+                          program: _program!,
+                          image: _snapshotImage!,
+                          progress: _controller.value,
+                          randoms: _randoms,
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
             ),
           ),
       ],
@@ -153,16 +169,28 @@ class _ShaderDustPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final shader = program.fragmentShader();
 
-    // 1. u_resolution
+    // How much padding we have added around the original image bounds
+    final dx = (size.width - image.width) / 2.0;
+    final dy = (size.height - image.height) / 2.0;
+
+    // We pass the logical dimensions of the ENTIRE expanded paint region
     shader.setFloat(0, size.width);
     shader.setFloat(1, size.height);
 
-    // 2. u_progress
-    shader.setFloat(2, progress);
+    // We pass the dimensions of the ORIGINAL IMAGE so we can normalise fetches
+    shader.setFloat(2, image.width.toDouble());
+    shader.setFloat(3, image.height.toDouble());
 
-    // 3. u_randoms[16] (16 vec2 = 32 floats starting at index 3)
+    // Pass the padding so we know where the image actually sits inside the canvas
+    shader.setFloat(4, dx);
+    shader.setFloat(5, dy);
+
+    // u_progress
+    shader.setFloat(6, progress);
+
+    // u_randoms[16] (16 vec2 = 32 floats starting at index 7)
     for (int i = 0; i < 32; i++) {
-      shader.setFloat(3 + i, randoms[i]);
+      shader.setFloat(7 + i, randoms[i]);
     }
 
     // 4. u_image
