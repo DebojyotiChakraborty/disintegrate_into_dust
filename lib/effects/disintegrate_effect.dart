@@ -1,33 +1,17 @@
+import 'dart:math';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 
-import 'dust_painter.dart';
-import 'dust_particle.dart';
-import 'particle_generator.dart';
-
 /// A reusable widget that wraps any [child] and, when [trigger] becomes
-/// `true`, captures a snapshot and plays a dust‑disintegration animation.
-///
-/// ```dart
-/// DisintegrateEffect(
-///   trigger: isDeleting,
-///   onComplete: () => removeMessage(),
-///   child: ChatBubble(...),
-/// )
-/// ```
+/// `true`, captures a snapshot and plays a dust‑disintegration animation
+/// driven by a GPU fragment shader.
 class DisintegrateEffect extends StatefulWidget {
-  /// When this switches from `false` → `true` the animation starts.
   final bool trigger;
-
-  /// Duration of the disintegration animation.
   final Duration duration;
-
-  /// Called after the animation finishes (use to remove the widget).
   final VoidCallback? onComplete;
-
-  /// The child widget to disintegrate.
   final Widget child;
 
   const DisintegrateEffect({
@@ -48,21 +32,41 @@ class _DisintegrateEffectState extends State<DisintegrateEffect>
 
   late final AnimationController _controller;
 
-  List<DustParticle>? _particles;
+  static ui.FragmentProgram? _program;
+
+  ui.Image? _snapshotImage;
   bool _animating = false;
+  late final Float32List _randoms;
 
   @override
   void initState() {
     super.initState();
     _controller = AnimationController(vsync: this, duration: widget.duration)
       ..addStatusListener(_onAnimationStatus);
+
+    // Generate 16 random (x,y) values from -1.0 to 1.0
+    _randoms = Float32List(32);
+    final rng = Random();
+    for (int i = 0; i < 32; i++) {
+      _randoms[i] = (rng.nextDouble() - 0.5) * 2.0;
+    }
+
+    _loadShader();
+  }
+
+  Future<void> _loadShader() async {
+    if (_program != null) return;
+    try {
+      _program = await ui.FragmentProgram.fromAsset('assets/shaders/dust.frag');
+    } catch (e) {
+      debugPrint("Error loading shader: \$e");
+    }
   }
 
   @override
   void didUpdateWidget(covariant DisintegrateEffect oldWidget) {
     super.didUpdateWidget(oldWidget);
 
-    // Trigger fires when the flag changes from false → true.
     if (widget.trigger && !oldWidget.trigger) {
       _startDisintegration();
     }
@@ -71,13 +75,11 @@ class _DisintegrateEffectState extends State<DisintegrateEffect>
   @override
   void dispose() {
     _controller.dispose();
+    _snapshotImage?.dispose();
     super.dispose();
   }
 
-  // ── Private ──────────────────────────────────────────────────────────
-
   Future<void> _startDisintegration() async {
-    // 1. Capture snapshot.
     final boundary =
         _boundaryKey.currentContext?.findRenderObject()
             as RenderRepaintBoundary?;
@@ -85,30 +87,16 @@ class _DisintegrateEffectState extends State<DisintegrateEffect>
 
     final image = await boundary.toImage(pixelRatio: 1.0);
 
-    // 2. Extract raw RGBA pixel data.
-    final byteData = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
-    if (byteData == null) {
+    if (!mounted) {
       image.dispose();
       return;
     }
 
-    // 3. Generate particles from pixel colours.
-    final particles = ParticleGenerator.generate(
-      pixelData: byteData,
-      imageWidth: image.width,
-      imageHeight: image.height,
-    );
-
-    image.dispose();
-
-    if (!mounted) return;
-
     setState(() {
-      _particles = particles;
+      _snapshotImage = image;
       _animating = true;
     });
 
-    // 4. Start the animation.
     _controller.forward(from: 0);
   }
 
@@ -118,28 +106,26 @@ class _DisintegrateEffectState extends State<DisintegrateEffect>
     }
   }
 
-  // ── Build ────────────────────────────────────────────────────────────
-
   @override
   Widget build(BuildContext context) {
     return Stack(
       children: [
-        // The original child — hidden once animation starts.
         Opacity(
           opacity: _animating ? 0 : 1,
           child: RepaintBoundary(key: _boundaryKey, child: widget.child),
         ),
 
-        // Particle overlay — visible only during animation.
-        if (_animating && _particles != null)
+        if (_animating && _snapshotImage != null && _program != null)
           Positioned.fill(
             child: AnimatedBuilder(
               animation: _controller,
-              builder: (_, __) {
+              builder: (context, _) {
                 return CustomPaint(
-                  painter: DustPainter(
-                    particles: _particles!,
+                  painter: _ShaderDustPainter(
+                    program: _program!,
+                    image: _snapshotImage!,
                     progress: _controller.value,
+                    randoms: _randoms,
                   ),
                 );
               },
@@ -147,5 +133,47 @@ class _DisintegrateEffectState extends State<DisintegrateEffect>
           ),
       ],
     );
+  }
+}
+
+class _ShaderDustPainter extends CustomPainter {
+  final ui.FragmentProgram program;
+  final ui.Image image;
+  final double progress;
+  final Float32List randoms;
+
+  _ShaderDustPainter({
+    required this.program,
+    required this.image,
+    required this.progress,
+    required this.randoms,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final shader = program.fragmentShader();
+
+    // 1. u_resolution
+    shader.setFloat(0, size.width);
+    shader.setFloat(1, size.height);
+
+    // 2. u_progress
+    shader.setFloat(2, progress);
+
+    // 3. u_randoms[16] (16 vec2 = 32 floats starting at index 3)
+    for (int i = 0; i < 32; i++) {
+      shader.setFloat(3 + i, randoms[i]);
+    }
+
+    // 4. u_image
+    shader.setImageSampler(0, image);
+
+    final paint = Paint()..shader = shader;
+    canvas.drawRect(Offset.zero & size, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _ShaderDustPainter oldDelegate) {
+    return oldDelegate.progress != progress;
   }
 }
